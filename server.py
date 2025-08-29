@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import secrets
 import websockets
-from flask import Flask
 
 # -------- Fichiers --------
 USERS_FILE = "users.json"
@@ -122,10 +121,7 @@ async def handler(websocket, path):
         print(f"Erreur dans le gestionnaire WebSocket: {e}")
     finally:
         clients.remove(websocket)
-
-# -------- Flask + WebSocket --------
-app = Flask(__name__)
-
+        
 @app.route("/")
 def home():
     return "✅ Serveur de chat en ligne (WebSocket disponible sur /ws)"
