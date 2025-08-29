@@ -1,130 +1,49 @@
-import os
-import json
-import time
-import hashlib
-import hmac
-import secrets
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import uvicorn
 
-USERS_FILE = "users.json"
-MSGS_FILE = "messages.json"
-
-# ---------------- Helpers fichiers ----------------
-def load_json(path, default):
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default, f, indent=2)
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-def save_json(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
-
-# ---------------- Users / Messages ----------------
-def get_users():
-    return load_json(USERS_FILE, {"users": []})
-
-def put_users(db):
-    save_json(USERS_FILE, db)
-
-def username_exists(db, username):
-    return any(u["username"].lower() == username.lower() for u in db["users"])
-
-def make_salt():
-    return secrets.token_hex(16)
-
-def hash_password(password, salt):
-    return hmac.new(bytes.fromhex(salt), password.encode("utf-8"), hashlib.sha256).hexdigest()
-
-def register_user(username, password):
-    db = get_users()
-    if username_exists(db, username):
-        return False, "Pseudo déjà pris."
-    salt = make_salt()
-    pwd_hash = hash_password(password, salt)
-    db["users"].append({
-        "username": username,
-        "salt": salt,
-        "pwd_hash": pwd_hash,
-        "created_at": int(time.time())
-    })
-    put_users(db)
-    return True, "Compte créé."
-
-def verify_user(username, password):
-    db = get_users()
-    for u in db["users"]:
-        if u["username"].lower() == username.lower():
-            return hmac.compare_digest(u["pwd_hash"], hash_password(password, u["salt"]))
-    return False
-
-def append_message(msg_obj):
-    db = load_json(MSGS_FILE, {"messages": []})
-    db["messages"].append(msg_obj)
-    save_json(MSGS_FILE, db)
-
-# ---------------- FastAPI ----------------
 app = FastAPI()
 
-# Autoriser CORS pour que le client puisse envoyer des requêtes
+# Autoriser le frontend React
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tu peux mettre l'URL de ton client spécifique si besoin
+    allow_origins=["*"],  # remplace par l'URL de ton frontend en prod si besoin
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- Pydantic Models ----------------
-class UserData(BaseModel):
-    user: str
-    password: str
+# Stockage temporaire des messages
+messages = []
 
-class MessageData(BaseModel):
+class Message(BaseModel):
     user: str
     text: str
 
-# ---------------- Routes ----------------
-@app.get("/")
-def root():
-    return {"status": "ok", "message": "Serveur de chat en ligne"}
-
-@app.post("/register")
-def http_register(data: UserData):
-    ok, msg = register_user(data.user, data.password)
-    return {"status": "ok" if ok else "error", "message": msg}
+# ------------------ Routes REST ------------------
 
 @app.post("/login")
-def http_login(data: UserData):
-    if verify_user(data.user, data.password):
-        return {"status": "ok", "message": "Connecté"}
-    return {"status": "error", "message": "Pseudo ou mot de passe incorrect"}
+def login(user: str, password: str):
+    return {"status": "ok", "message": f"Connecté en tant que {user}"}
+
+@app.post("/register")
+def register(user: str, password: str):
+    return {"status": "ok", "message": f"Compte créé pour {user}"}
 
 @app.post("/send")
-def http_send(data: MessageData):
-    msg_obj = {"type": "msg", "from": data.user, "text": data.text, "ts": int(time.time())}
-    append_message(msg_obj)
+def send_message(msg: Message):
+    messages.append(msg.dict())
     return {"status": "ok"}
 
 @app.get("/messages")
-def http_messages():
-    db = load_json(MSGS_FILE, {"messages": []})
-    return db
+def get_messages():
+    return {"messages": messages}
 
-# ---------------- Run ----------------
-if __name__ == "__main__":
-    # Assure que les fichiers existent
-    load_json(USERS_FILE, {"users": []})
-    load_json(MSGS_FILE, {"messages": []})
+# ------------------ WebSocket ------------------
 
-    PORT = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    while True:
+        data = await ws.receive_json()
+        messages.append(data)
+        await ws.send_json(messages)
