@@ -1,86 +1,74 @@
-import json
-import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from threading import Lock
+import json, uuid, os
 
-# ---------------- CONFIG ----------------
-USERS_FILE = "users.json"
-lock = Lock()
-messages = []  # Messages stockés en mémoire
+app = FastAPI()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ---------------- INIT APP ----------------
-app = FastAPI(title="ChatSolution API")
+USERS_FILE = os.path.join(BASE_DIR, "users.json")
+SESSIONS_FILE = os.path.join(BASE_DIR, "sessions.json")
+MESSAGES_FILE = os.path.join(BASE_DIR, "messages.json")
 
-# CORS pour le client desktop
+# Autoriser le client desktop
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- UTILS ----------------
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w") as f:
-            json.dump({}, f)
-    with open(USERS_FILE, "r") as f:
+def load_json(path):
+    if not os.path.exists(path):
+        return {} if "users" in path or "sessions" in path else []
+    with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save_users(users):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, indent=4)
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
-# ---------------- MODELS ----------------
-class AuthRequest(BaseModel):
-    action: str
-    username: str
-    password: str
-
-class MessageRequest(BaseModel):
-    from_user: str
-    text: str
-
-# ---------------- ROUTES ----------------
+# ---------------- AUTH ----------------
 @app.post("/auth")
-def auth(req: AuthRequest):
-    if not req.username or not req.password:
-        raise HTTPException(status_code=400, detail="Remplis tous les champs")
+def auth(action: str, username: str, password: str):
+    users = load_json(USERS_FILE)
+    sessions = load_json(SESSIONS_FILE)
 
-    with lock:
-        users = load_users()
-        if req.action == "register":
-            if req.username in users:
-                raise HTTPException(status_code=400, detail="Utilisateur déjà existant")
-            users[req.username] = req.password
-            save_users(users)
-            return {"status": "ok"}
-        elif req.action == "login":
-            if req.username not in users or users[req.username] != req.password:
-                raise HTTPException(status_code=400, detail="Login incorrect")
-            return {"status": "ok"}
-        else:
-            raise HTTPException(status_code=400, detail="Action inconnue")
+    if action == "register":
+        if username in users:
+            raise HTTPException(status_code=400, detail="Utilisateur déjà existant")
+        users[username] = password
+        save_json(USERS_FILE, users)
 
+    elif action == "login":
+        if username not in users or users[username] != password:
+            raise HTTPException(status_code=400, detail="Login incorrect")
+    else:
+        raise HTTPException(status_code=400, detail="Action inconnue")
+
+    # Génération du token de session
+    token = str(uuid.uuid4())
+    sessions[token] = username
+    save_json(SESSIONS_FILE, sessions)
+    return {"status": "ok", "token": token}
+
+# ---------------- SEND MESSAGE ----------------
 @app.post("/send")
-def send(req: MessageRequest):
-    if not req.from_user or not req.text:
-        raise HTTPException(status_code=400, detail="Données invalides")
-    messages.append({"from_user": req.from_user, "text": req.text})
+def send(text: str, token: str = Header(...)):
+    sessions = load_json(SESSIONS_FILE)
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Session invalide")
+    username = sessions[token]
+
+    messages = load_json(MESSAGES_FILE)
+    messages.append({"from_user": username, "text": text})
+    save_json(MESSAGES_FILE, messages)
     return {"status": "ok"}
 
+# ---------------- GET MESSAGES ----------------
 @app.get("/messages")
-def get_messages():
+def get_messages(token: str = Header(...)):
+    sessions = load_json(SESSIONS_FILE)
+    if token not in sessions:
+        raise HTTPException(status_code=401, detail="Session invalide")
+    messages = load_json(MESSAGES_FILE)
     return messages
-
-@app.get("/")
-def root():
-    return {"message": "ChatSolution API en ligne"}
-
-# ---------------- MAIN ----------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=5000, log_level="info")
