@@ -6,12 +6,13 @@ import hmac
 import secrets
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
 
 USERS_FILE = "users.json"
 MSGS_FILE = "messages.json"
 
-# ---------------- helpers fichiers ----------------
+# ---------------- Helpers fichiers ----------------
 def load_json(path, default):
     if not os.path.exists(path):
         with open(path, "w", encoding="utf-8") as f:
@@ -26,10 +27,10 @@ def load_json(path, default):
 def save_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 
-# ---------------- users/messages ----------------
+# ---------------- Users / Messages ----------------
 def get_users():
     return load_json(USERS_FILE, {"users": []})
 
@@ -51,7 +52,12 @@ def register_user(username, password):
         return False, "Pseudo déjà pris."
     salt = make_salt()
     pwd_hash = hash_password(password, salt)
-    db["users"].append({"username": username, "salt": salt, "pwd_hash": pwd_hash, "created_at": int(time.time())})
+    db["users"].append({
+        "username": username,
+        "salt": salt,
+        "pwd_hash": pwd_hash,
+        "created_at": int(time.time())
+    })
     put_users(db)
     return True, "Compte créé."
 
@@ -73,30 +79,39 @@ app = FastAPI()
 # Autoriser CORS pour que le client puisse envoyer des requêtes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # mettre ton client spécifique si besoin
+    allow_origins=["*"],  # Tu peux mettre l'URL de ton client spécifique si besoin
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---------------- Pydantic Models ----------------
+class UserData(BaseModel):
+    user: str
+    password: str
+
+class MessageData(BaseModel):
+    user: str
+    text: str
+
+# ---------------- Routes ----------------
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Serveur de chat en ligne"}
 
 @app.post("/register")
-def http_register(user: str, password: str):
-    ok, msg = register_user(user, password)
+def http_register(data: UserData):
+    ok, msg = register_user(data.user, data.password)
     return {"status": "ok" if ok else "error", "message": msg}
 
 @app.post("/login")
-def http_login(user: str, password: str):
-    if verify_user(user, password):
+def http_login(data: UserData):
+    if verify_user(data.user, data.password):
         return {"status": "ok", "message": "Connecté"}
-    else:
-        return {"status": "error", "message": "Pseudo ou mot de passe incorrect"}
+    return {"status": "error", "message": "Pseudo ou mot de passe incorrect"}
 
 @app.post("/send")
-def http_send(user: str, text: str):
-    msg_obj = {"type": "msg", "from": user, "text": text, "ts": int(time.time())}
+def http_send(data: MessageData):
+    msg_obj = {"type": "msg", "from": data.user, "text": data.text, "ts": int(time.time())}
     append_message(msg_obj)
     return {"status": "ok"}
 
