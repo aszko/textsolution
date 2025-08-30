@@ -1,20 +1,19 @@
-import json, os, uuid
+import os, json, uuid
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-
-USERS_FILE = "users.json"
-MESSAGES_FILE = "messages.json"
+from pydantic import BaseModel
+from threading import Lock
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Fichiers
+USERS_FILE = "users.json"
+MESSAGES_FILE = "messages.json"
+SESSIONS_FILE = "sessions.json"
 
-# ---------- Utils ----------
+lock = Lock()
+
+# ---------------- UTILS ----------------
 def load_json(file_path, default):
     if not os.path.exists(file_path):
         with open(file_path, "w") as f:
@@ -26,77 +25,63 @@ def save_json(file_path, data):
     with open(file_path, "w") as f:
         json.dump(data, f, indent=4)
 
-# ---------- Routes ----------
+# ---------------- MODELS ----------------
+class AuthRequest(BaseModel):
+    action: str
+    username: str
+    password: str
+
+class MessageRequest(BaseModel):
+    token: str
+    text: str
+
+# ---------------- AUTH ----------------
 @app.post("/auth")
-async def auth(request: Request):
-    data = await request.json()
-    action = data.get("action")
-    username = data.get("username")
-    password = data.get("password")
+def auth(req: AuthRequest):
+    with lock:
+        users = load_json(USERS_FILE, {})
+        sessions = load_json(SESSIONS_FILE, {})
 
-    if not username or not password:
-        raise HTTPException(status_code=400, detail="Remplis tous les champs")
+        if req.action == "register":
+            if req.username in users:
+                raise HTTPException(status_code=400, detail="Utilisateur déjà existant")
+            users[req.username] = req.password
+            save_json(USERS_FILE, users)
 
-    users = load_json(USERS_FILE, {})
+        elif req.action == "login":
+            if req.username not in users or users[req.username] != req.password:
+                raise HTTPException(status_code=400, detail="Identifiants invalides")
 
-    if action == "register":
-        if username in users:
-            raise HTTPException(status_code=400, detail="Utilisateur déjà existant")
+        # Création token
         token = str(uuid.uuid4())
-        users[username] = {"password": password, "token": token}
-        save_json(USERS_FILE, users)
-        return {"status":"ok","token":token}
+        sessions[token] = req.username
+        save_json(SESSIONS_FILE, sessions)
 
-    elif action == "login":
-        if username not in users or users[username]["password"] != password:
-            raise HTTPException(status_code=400, detail="Login incorrect")
-        token = str(uuid.uuid4())  # nouveau token à chaque login
-        users[username]["token"] = token
-        save_json(USERS_FILE, users)
-        return {"status":"ok","token":token}
+        return {"status": "ok", "token": token}
 
-    else:
-        raise HTTPException(status_code=400, detail="Action inconnue")
-
-@app.get("/validate")
-async def validate(token: str):
-    users = load_json(USERS_FILE, {})
-    for u,v in users.items():
-        if v.get("token") == token:
-            return {"status":"ok","username":u}
-    raise HTTPException(status_code=401, detail="Token invalide")
-
+# ---------------- SEND MESSAGE ----------------
 @app.post("/send")
-async def send(request: Request, token: str):
-    data = await request.json()
-    text = data.get("text")
-    if not text:
-        raise HTTPException(status_code=400, detail="Message vide")
+def send(req: MessageRequest):
+    with lock:
+        sessions = load_json(SESSIONS_FILE, {})
+        if req.token not in sessions:
+            raise HTTPException(status_code=401, detail="Session invalide")
 
-    users = load_json(USERS_FILE, {})
-    sender = None
-    for u,v in users.items():
-        if v.get("token") == token:
-            sender = u
-            break
-    if not sender:
-        raise HTTPException(status_code=401, detail="Token invalide")
+        username = sessions[req.token]
+        messages = load_json(MESSAGES_FILE, [])
+        msg_id = len(messages) + 1
+        messages.append({"id": msg_id, "from_user": username, "text": req.text})
+        save_json(MESSAGES_FILE, messages)
 
-    messages = load_json(MESSAGES_FILE, [])
-    messages.append({"from_user": sender, "text": text})
-    save_json(MESSAGES_FILE, messages)
-    return {"status":"ok"}
+        return {"status": "ok"}
 
+# ---------------- GET MESSAGES ----------------
 @app.get("/messages")
-async def get_messages(token: str):
-    users = load_json(USERS_FILE, {})
-    valid = any(v.get("token") == token for v in users.values())
-    if not valid:
-        raise HTTPException(status_code=401, detail="Token invalide")
-    messages = load_json(MESSAGES_FILE, [])
-    return messages
+def get_messages():
+    with lock:
+        return load_json(MESSAGES_FILE, [])
 
-# ---------- Main ----------
+# ---------------- MAIN ----------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    uvicorn.run("server:app", host="0.0.0.0", port=5000, reload=True)
